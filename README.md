@@ -1,4 +1,4 @@
-# effi – e-mail filter for imap
+# EffI – Email filter for IMAP
 
-effi is a small python program which monitors one specific IMAP folder
-(usually the INBOX) and sorts e-mails away with rules you specify.
+EffI is a small python program which monitors one specific IMAP folder
+(usually the INBOX) and sorts emails away with rules you specify.

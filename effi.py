@@ -232,13 +232,17 @@ def apply_rules(imap, rules):
         for folder_rule in folder_rules:
             if search_rules:
                 search_rules.insert(0, 'OR')
-            try:
-                search_rules.extend(folder_rule)
-            except TypeError:
+
+            if isinstance(folder_rule, str):
                 search_rules.append(folder_rule)
+            else:
+                search_rules.extend(folder_rule)
 
         messages = imap.search(search_rules)
         log.debug('Found %d messages for filter "%s"', len(messages), folder)
+
+        if not messages:
+            continue
 
         copy_response = imap.copy(messages, folder)
         log.debug('Copied %d messages to folder "%s": %s', len(messages),

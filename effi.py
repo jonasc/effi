@@ -224,7 +224,7 @@ script_module = importlib.import_module(script_module_name)
 def apply_rules(imap, rules):
     log = logging.getLogger()
 
-    for folder, folder_rules in rules.items():
+    for folder, folder_rules in rules:
         if not folder_rules:
             continue
 

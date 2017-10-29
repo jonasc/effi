@@ -294,17 +294,24 @@ try:
             results = imap.idle_check(timeout=30)
             imap.idle_done()
 
+            something_changed = False
+
             if script_last_mtime < os.path.getmtime(config.get('general',
                                                                'script')):
                 script_last_mtime = os.path.getmtime(config.get('general',
                                                                 'script'))
                 log.info('Script "%s" changed, reloading', script_module_name)
                 script_module = importlib.reload(script_module)
+                something_changed = True
 
             for result in results:
                 if result[1] != b'EXISTS':
                     continue
+                something_changed = True
+
+            if something_changed:
                 apply_rules(imap, script_module.get_rules())
+
         except KeyboardInterrupt:
             raise
 

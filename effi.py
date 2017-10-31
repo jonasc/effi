@@ -10,6 +10,7 @@ import stat
 import sys
 import imapclient
 import importlib
+import imaplib
 
 __version__ = '0.1'
 
@@ -256,35 +257,59 @@ def apply_rules(imap, rules):
         log.info('Moved %d messages to folder "%s"', len(messages), folder)
 
 
+def imap_login(config):
+    log = logging.getLogger()
+
+    # Connect to IMAP
+    try:
+        imap = imapclient.IMAPClient(host=config.get('imap', 'host'),
+                                     use_uid=True,
+                                     ssl=True)
+        log.debug('Connected to IMAP host %s', config.get('imap', 'host'))
+    except BaseException:
+        log.critical(
+            'Could not connect to IMAP host %s', config.get('imap', 'host')
+        )
+        sys.exit(1)
+    try:
+        imap.login(config.get('imap', 'user'), config.get('imap', 'password'))
+        log.debug('Logged in on IMAP host as %s', config.get('imap', 'user'))
+    except BaseException:
+        log.critical(
+            'Could not login on IMAP host as %s', config.get('imap', 'user')
+        )
+        sys.exit(1)
+
+    try:
+        folder = config.get('general', 'folder')
+        imap.select_folder(folder)
+    except BaseException:
+        log.critical('Cannot select mailbox %s', folder)
+        sys.exit(1)
+
+    return imap
+
+
+def imap_close(imap):
+    log = logging.getLogger()
+
+    # Disconnect from IMAP
+    try:
+        imap.close_folder()
+        log.debug('Closed IMAP directory')
+    except BaseException:
+        log.warn('Could not close directory')
+    try:
+        imap.logout()
+        log.debug('Logged out from IMAP')
+    except Exception as e:
+        log.warn('Could not log out from IMAP: %s', e)
+
+
 # ==============================================================================
 # Main program
 # ==============================================================================
-# Connect to IMAP
-try:
-    imap = imapclient.IMAPClient(host=config.get('imap', 'host'),
-                                 use_uid=True,
-                                 ssl=True)
-    log.debug('Connected to IMAP host %s', config.get('imap', 'host'))
-except BaseException:
-    log.critical(
-        'Could not connect to IMAP host %s', config.get('imap', 'host')
-    )
-    sys.exit(1)
-try:
-    imap.login(config.get('imap', 'user'), config.get('imap', 'password'))
-    log.debug('Logged in on IMAP host as %s', config.get('imap', 'user'))
-except BaseException:
-    log.critical(
-        'Could not login on IMAP host as %s', config.get('imap', 'user')
-    )
-    sys.exit(1)
-
-try:
-    folder = config.get('general', 'folder')
-    imap.select_folder(folder)
-except BaseException:
-    log.critical('Cannot select mailbox %s', folder)
-    sys.exit(1)
+imap = imap_login(config)
 
 try:
     apply_rules(imap, script_module.get_rules())
@@ -312,24 +337,15 @@ try:
             if something_changed:
                 apply_rules(imap, script_module.get_rules())
 
-        except KeyboardInterrupt:
-            raise
+        except imaplib.IMAP4.abort:
+            log.warn('IMAP abort exception. Trying to reconnect...')
+            imap_close(imap)
+            imap = imap_login(config)
 
 except KeyboardInterrupt:
     log.info('Program got CTRL+C interrupt. Exiting...')
     imap.idle_done()
 
-# Disconnect from IMAP
-try:
-    imap.close_folder()
-    log.debug('Closed IMAP directory')
-except BaseException:
-    log.warn('Could not close directory')
-    pass
-try:
-    imap.logout()
-    log.debug('Logged out from IMAP')
-except Exception as e:
-    log.warn('Could not log out from IMAP: %s', e)
+imap_close(imap)
 
 log.info('Finished')

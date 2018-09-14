@@ -337,14 +337,17 @@ try:
             if something_changed:
                 apply_rules(imap, script_module.get_rules())
 
-        except imaplib.IMAP4.abort:
+        except (imaplib.IMAP4.abort, TimeoutError, ConnectionResetError):
             log.warn('IMAP abort exception. Trying to reconnect...')
             imap_close(imap)
             imap = imap_login(config)
 
 except KeyboardInterrupt:
     log.info('Program got CTRL+C interrupt. Exiting...')
-    imap.idle_done()
+    try:
+        imap.idle_done()
+    except BaseException:
+        pass
 
 imap_close(imap)
 

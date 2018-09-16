@@ -6,13 +6,16 @@ import os
 import getpass
 import logging
 from configparser import ConfigParser
+from collections import defaultdict
+import functools
+import operator
 import stat
 import sys
 import imapclient
 import importlib
 import imaplib
 
-__version__ = '0.1'
+__version__ = '0.2'
 
 
 # ==============================================================================
@@ -36,6 +39,11 @@ group_general = argparser.add_argument_group('general settings')
 group_general.add_argument(
     '-f', '--folder',
     help='set the IMAP folder which should be watched'
+)
+group_general.add_argument(
+    '-i', '--ignore',
+    default='',
+    help='set the IMAP folders which should be ignored'
 )
 group_general.add_argument(
     '-c', '--config',
@@ -204,6 +212,9 @@ if not config.has_option('imap', 'password'):
 if critical_error:
     sys.exit(1)
 
+config.set('general', 'ignore',
+           ','.join(map(str.strip, config.get('general', 'ignore').split(','))))
+
 # ==============================================================================
 # Load user supplied script which contains the sorting rules
 # ==============================================================================
@@ -255,6 +266,116 @@ def apply_rules(imap, rules):
         except TypeError:
             imap.expunge()
         log.info('Moved %d messages to folder "%s"', len(messages), folder)
+
+
+def move_replies(imap, config):
+    log = logging.getLogger()
+    ignored_folders = config.get('general', 'ignore').split(',')
+
+    result = imap.search(['HEADER', 'In-Reply-To', '@'])
+    data = imap.fetch(result, ['ENVELOPE'])
+    messages = defaultdict(set)
+    envelopes = dict()
+    for id_, message in data.items():
+        envelope = message[b'ENVELOPE']
+        envelopes[id_] = envelope
+        messages[envelope.in_reply_to].add(id_)
+
+    query = ['OR'] * (len(messages) - 1)
+    query.extend(functools.reduce(
+        operator.concat,
+        (('HEADER', 'Message-ID', msg_id) for msg_id in messages.keys())
+    ))
+
+    log.debug('Found %d messages with In-Reply-To header', len(messages))
+
+    def recursively_remove_message_tree(messages, envelopes, msg_ids):
+        from queue import Queue
+
+        ids = Queue()
+
+        if not isinstance(msg_ids, list):
+            ids.put(msg_ids)
+        else:
+            for msg_id in msg_ids:
+                ids.put(msg_id)
+
+        while not ids.empty():
+            msg_id = ids.get()
+            if msg_id not in messages:
+                continue
+            uids = messages[msg_id]
+            del messages[msg_id]
+            for uid in uids:
+                for m_id in envelopes[uid].message_id:
+                    ids.put(m_id)
+
+    result = imap.search(query)
+    to_delete = []
+    data = imap.fetch(result, ['ENVELOPE'])
+    for id_, message in data.items():
+        envelope = message[b'ENVELOPE']
+        if envelope.in_reply_to is None:
+            # Neither this message nor all depending messages need to be
+            # considered
+            recursively_remove_message_tree(
+                messages, envelopes, envelope.message_id)
+        else:
+            # Add all messages depending on this message to the message this
+            # message depends on
+            messages[envelope.in_reply_to].update(messages[envelope.message_id])
+            messages[envelope.message_id] = messages[envelope.in_reply_to]
+            to_delete.append(envelope.message_id)
+
+    # number_of_messages_before = len(messages)
+
+    for msg_id in to_delete:
+        del messages[msg_id]
+
+    if b'' in messages:
+        del messages[b'']
+
+    # log.debug('Ignored %d messages whose initial message is also in "%s"',
+    #           len(functools.reduce(set.union, messages.values())) - number_of_messages_before,
+    #           config.get('general', 'folder'))
+
+    folders = imap.list_folders()
+    for _, _, folder in folders:
+        ignored = False
+        for ignored_folder in ignored_folders:
+            if folder.startswith(ignored_folder):
+                ignored = True
+
+        if ignored or folder == config.get('general', 'folder'):
+            continue
+
+        query = ['OR'] * (len(messages) - 1)
+        query.extend(functools.reduce(
+            operator.concat,
+            (('HEADER', 'Message-ID', msg_id) for msg_id in messages.keys())
+        ))
+
+        imap.select_folder(folder)
+        result = imap.search(query)
+
+        if result:
+
+            data = imap.fetch(result, ['ENVELOPE'])
+            message_ids = list(message[b'ENVELOPE'].message_id for message in data.values())
+
+            ids_to_move = list(functools.reduce(set.union, (messages[msg_id] for msg_id in message_ids)))
+
+            imap.select_folder(config.get('general', 'folder'))
+            copy_response = imap.copy(ids_to_move, folder)
+            log.debug('Copied %d replies to folder "%s": %s', len(ids_to_move),
+                      folder, copy_response)
+
+            imap.delete_messages(ids_to_move)
+            try:
+                imap.expunge(ids_to_move)
+            except TypeError:
+                imap.expunge()
+            log.info('Moved %d replies to folder "%s"', len(ids_to_move), folder)
 
 
 def imap_login(config):
@@ -313,6 +434,7 @@ imap = imap_login(config)
 
 try:
     apply_rules(imap, script_module.get_rules())
+    move_replies(imap, config)
     while True:
         try:
             imap.idle()
@@ -336,6 +458,7 @@ try:
 
             if something_changed:
                 apply_rules(imap, script_module.get_rules())
+                move_replies(imap, config)
 
         except (imaplib.IMAP4.abort, TimeoutError, ConnectionResetError):
             log.warn('IMAP abort exception. Trying to reconnect...')

@@ -256,9 +256,14 @@ def apply_rules(imap, rules):
         if not messages:
             continue
 
-        copy_response = imap.copy(messages, folder)
-        log.debug('Copied %d messages to folder "%s": %s', len(messages),
-                  folder, copy_response)
+        try:
+            copy_response = imap.copy(messages, folder)
+            log.debug('Copied %d messages to folder "%s": %s', len(messages),
+                      folder, copy_response)
+        except imaplib.error as e:
+            log.error('Copying %d messages to folder "%s" failed: %s',
+                      len(messages), folder, e)
+            continue
 
         imap.delete_messages(messages)
         try:
@@ -270,6 +275,7 @@ def apply_rules(imap, rules):
 
 def move_replies(imap, config):
     log = logging.getLogger()
+    log.debug('Looking for replies to sort into other folders.')
     ignored_folders = config.get('general', 'ignore').split(',')
 
     result = imap.search(['HEADER', 'In-Reply-To', '@'])
@@ -277,9 +283,16 @@ def move_replies(imap, config):
     messages = defaultdict(set)
     envelopes = dict()
     for id_, message in data.items():
-        envelope = message[b'ENVELOPE']
+        try:
+            envelope = message[b'ENVELOPE']
+        except KeyError as e:
+            print(e, message)
+            continue
         envelopes[id_] = envelope
         messages[envelope.in_reply_to].add(id_)
+
+    if not messages:
+        return
 
     query = ['OR'] * (len(messages) - 1)
     query.extend(functools.reduce(
@@ -290,6 +303,10 @@ def move_replies(imap, config):
     log.debug('Found %d messages with In-Reply-To header', len(messages))
 
     def recursively_remove_message_tree(messages, envelopes, msg_ids):
+        log.debug("recursively_remove_message_tree(...)")
+        log.debug("messages: {}".format(messages))
+        log.debug("envelopes: {}".format(envelopes))
+        log.debug("msg_ids: {}".format(msg_ids))
         from queue import Queue
 
         ids = Queue()
@@ -305,16 +322,25 @@ def move_replies(imap, config):
             if msg_id not in messages:
                 continue
             uids = messages[msg_id]
+            log.debug("id: {} -- uids: {}".format(msg_id, uids))
             del messages[msg_id]
             for uid in uids:
-                for m_id in envelopes[uid].message_id:
-                    ids.put(m_id)
+                log.debug("uid: {} -- envelope: {}".format(uid, envelopes[uid]))
+                try:
+                    for m_id in envelopes[uid].message_id:
+                        ids.put(m_id)
+                except TypeError:
+                    pass
 
     result = imap.search(query)
     to_delete = []
     data = imap.fetch(result, ['ENVELOPE'])
     for id_, message in data.items():
-        envelope = message[b'ENVELOPE']
+        try:
+            envelope = message[b'ENVELOPE']
+        except KeyError as e:
+            log.debug('Exception "%s" -- Message: %s', e, message)
+            continue
         if envelope.in_reply_to is None:
             # Neither this message nor all depending messages need to be
             # considered
@@ -334,6 +360,9 @@ def move_replies(imap, config):
 
     if b'' in messages:
         del messages[b'']
+
+    if not messages:
+        return
 
     # log.debug('Ignored %d messages whose initial message is also in "%s"',
     #           len(functools.reduce(set.union, messages.values())) - number_of_messages_before,
@@ -387,10 +416,13 @@ def imap_login(config):
                                      use_uid=True,
                                      ssl=True)
         log.debug('Connected to IMAP host %s', config.get('imap', 'host'))
-    except BaseException:
+    except BaseException as e:
         log.critical(
             'Could not connect to IMAP host %s', config.get('imap', 'host')
         )
+        log.critical('%s', e)
+        import traceback
+        traceback.print_exception(e.__class__, e, e.__traceback__)
         sys.exit(1)
     try:
         imap.login(config.get('imap', 'user'), config.get('imap', 'password'))
@@ -437,6 +469,8 @@ try:
     move_replies(imap, config)
     while True:
         try:
+            folder = config.get('general', 'folder')
+            imap.select_folder(folder)
             imap.idle()
             results = imap.idle_check(timeout=30)
             imap.idle_done()
